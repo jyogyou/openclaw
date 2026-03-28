@@ -1,0 +1,76 @@
+services:
+  openclaw-gateway:
+    image: ghcr.io/openclaw/openclaw:latest
+    container_name: openclaw-gateway
+    user: "0:0"
+    network_mode: "host"
+    environment:
+      HOME: /home/node
+      OPENCLAW_INSTALL_WEIXIN_PLUGIN: "1"
+      OPENCLAW_WEIXIN_PLUGIN_SPEC: "@tencent-weixin/openclaw-weixin@latest"
+      TERM: xterm-256color
+      TZ: UTC
+    volumes:
+      - ./openclaw-data:/home/node/.openclaw
+      - ./openclaw-workspace:/home/node/.openclaw/workspace
+    init: true
+    restart: unless-stopped
+    command:
+      [
+        "sh",
+        "-lc",
+        "mkdir -p /home/node/.openclaw /home/node/.openclaw/workspace && if [ ! -f /home/node/.openclaw/openclaw.json ]; then node dist/index.js config set gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback true --strict-json; fi && if [ \"${OPENCLAW_INSTALL_WEIXIN_PLUGIN:-1}\" = \"1\" ] && [ ! -f /home/node/.openclaw/extensions/openclaw-weixin/package.json ]; then HOME=/home/node node dist/index.js plugins install \"${OPENCLAW_WEIXIN_PLUGIN_SPEC:-@tencent-weixin/openclaw-weixin@latest}\"; fi && exec node dist/index.js gateway --bind lan --port 18789 --allow-unconfigured",
+      ]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:18789/healthz').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  clawpanel:
+    build:
+      context: .
+      dockerfile: Dockerfile.clawpanel
+    container_name: clawpanel
+    network_mode: "service:openclaw-gateway"
+    depends_on:
+      - openclaw-gateway
+    environment:
+      HOME: /root
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 1420
+      TZ: UTC
+    volumes:
+      - ./openclaw-data:/root/.openclaw
+      - ./openclaw-workspace:/root/.openclaw/workspace
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+    init: true
+
+  openclaw-cli:
+    image: ghcr.io/openclaw/openclaw:latest
+    container_name: openclaw-cli
+    user: "0:0"
+    network_mode: "service:openclaw-gateway"
+    depends_on:
+      - openclaw-gateway
+    environment:
+      HOME: /home/node
+      TERM: xterm-256color
+      TZ: UTC
+      BROWSER: echo
+    volumes:
+      - ./openclaw-data:/home/node/.openclaw
+      - ./openclaw-workspace:/home/node/.openclaw/workspace
+    stdin_open: true
+    tty: true
+    init: true
+    profiles: ["cli"]

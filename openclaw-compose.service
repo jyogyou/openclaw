@@ -1,0 +1,16 @@
+[Unit]
+Description=OpenClaw + ClawPanel Docker Compose Stack
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=__PROJECT_DIR__
+ExecStart=__DOCKER_BIN__ compose up -d --build
+ExecStop=__DOCKER_BIN__ compose down
+RemainAfterExit=yes
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target

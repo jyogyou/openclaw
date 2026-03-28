@@ -1,0 +1,27 @@
+FROM node:24-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+COPY patch-clawpanel-headless.sh /tmp/patch-clawpanel-headless.sh
+
+RUN apt-get update && apt-get install -y \
+    --no-install-recommends \
+    git \
+    curl \
+    python3 \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g openclaw@latest
+
+WORKDIR /app
+
+RUN git clone https://github.com/qingchencloud/clawpanel.git . \
+    && chmod +x /tmp/patch-clawpanel-headless.sh \
+    && /tmp/patch-clawpanel-headless.sh \
+    && npm install \
+    && npm run build
+
+EXPOSE 1420
+
+CMD ["npm", "run", "serve"]
