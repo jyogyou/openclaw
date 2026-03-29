@@ -11,6 +11,8 @@
 
 - `clawpanel` 和 `openclaw` 共用同一份数据目录
 - `clawpanel` 能直接控制 `openclaw gateway`
+- 使用 Docker `bridge` 网络，而不是 `host` 网络
+- 容器内可通过 `host.docker.internal:host-gateway` 访问宿主机开放的中转端口
 - 首次启动自动完成 OpenClaw 最小初始化
 - 首次启动自动安装微信插件
 - 面板中可识别微信插件，并可直接执行微信扫码登录
@@ -89,7 +91,10 @@ sudo systemctl status openclaw-compose.service
 ## 注意事项
 
 - 该方案面向 Linux
-- `openclaw-gateway` 使用 `host` 网络模式
-- `clawpanel` 复用 `openclaw-gateway` 的网络命名空间
-- 不会自动做“内网穿透”，但服务默认对局域网可见
+- `openclaw-gateway` 和 `clawpanel` 使用自定义 `bridge` 网络
+- 宿主机只暴露：
+  - `1420`：ClawPanel
+  - `18789`：OpenClaw Gateway
+- 容器内已注入 `host.docker.internal:host-gateway`
+- 这不会自动做“内网穿透”，但容器可主动访问宿主机开放的端口
 - 如果要长期公网暴露，建议后续自行增加防火墙限制和来源白名单

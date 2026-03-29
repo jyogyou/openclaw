@@ -26,30 +26,35 @@
 
 - `openclaw-gateway`
   - 使用镜像 `ghcr.io/openclaw/openclaw:latest`
-  - 使用 `network_mode: "host"`（Linux）
+  - 使用自定义 `bridge` 网络 `openclaw-net`
+  - 通过 `extra_hosts` 注入：
+    - `host.docker.internal:host-gateway`
   - 首启自动安装微信 channel 插件：
     - `@tencent-weixin/openclaw-weixin@latest`
   - 共享卷：
     - `./openclaw-data:/home/node/.openclaw`
     - `./openclaw-workspace:/home/node/.openclaw/workspace`
-  - 通过宿主机网络直接监听：
-    - `1420`：ClawPanel Web
+  - 通过端口发布暴露：
     - `18789`：OpenClaw Gateway
-    - `18790`：保留
 - `clawpanel`
   - 通过 `Dockerfile.clawpanel` 构建
-  - 使用 `network_mode: service:openclaw-gateway`
-  - 与 `openclaw-gateway` 共用网络命名空间
+  - 使用同一个 `bridge` 网络 `openclaw-net`
+  - 通过服务名 `openclaw-gateway` 访问 Gateway
+  - 通过 `extra_hosts` 注入：
+    - `host.docker.internal:host-gateway`
   - 构建时会应用 `patch-clawpanel-headless.sh`
   - 该补丁为 headless Web 模式补充：
     - 微信插件状态检测接口
     - 微信 `run_channel_action` 登录动作
     - `/__api/events` SSE 事件流
     - Web 模式下的前端事件监听适配
+    - `OPENCLAW_GATEWAY_HOST` 环境变量支持
   - 共享卷：
     - `./openclaw-data:/root/.openclaw`
     - `./openclaw-workspace:/root/.openclaw/workspace`
     - `/var/run/docker.sock:/var/run/docker.sock`
+  - 通过端口发布暴露：
+    - `1420`：ClawPanel Web
 - `openclaw-cli`
   - 仅作为可选工具容器
   - 使用 `profiles: ["cli"]`
@@ -90,6 +95,13 @@ cd openclaw
   - `installed: true`
   - `installedVersion: 2.1.1`
   - `compatible: true`
+- `clawpanel` 容器内可解析：
+  - `openclaw-gateway`
+  - `host.docker.internal`
+- `clawpanel` 容器内请求 `http://openclaw-gateway:18789/healthz` 返回 `{"ok":true,"status":"live"}`
+- `ws://127.0.0.1:1420/ws` 在 bridge 模式下握手成功
+- 微信扫码登录事件流在 bridge 模式下可收到真实二维码链接：
+  - `https://liteapp.weixin.qq.com/q/...`
 
 ## 开机自动启动
 
@@ -190,12 +202,27 @@ sudo systemctl start openclaw-compose.service
 - 在 Linux 上，`network_mode: service:openclaw-gateway` + bridge 端口发布 对 `1420` 表现不稳定
 - 容器内 `clawpanel` 可正常返回 HTML，但宿主机访问 `1420` 会出现 `connection reset` / `empty reply`
 
-最终处理方式：
+曾经的临时处理方式是：
 
 - `openclaw-gateway` 改为 `network_mode: "host"`
 - `clawpanel` 继续共享 `openclaw-gateway` 的网络命名空间
 
-这样 `1420` 和 `18789` 都直接监听在宿主机网络上，不再依赖有问题的 Docker 端口发布链路
+这能绕过 Linux 上的端口发布异常，但安全边界太弱，容器会直接处于宿主机网络命名空间。
+
+当前正式处理方式已改为：
+
+- 使用自定义 `bridge` 网络 `openclaw-net`
+- `openclaw-gateway` 单独发布 `18789:18789`
+- `clawpanel` 单独发布 `1420:1420`
+- `clawpanel` 通过 `OPENCLAW_GATEWAY_HOST=openclaw-gateway` 访问 Gateway
+- 为容器注入 `host.docker.internal:host-gateway`
+
+最终验证结果：
+
+- `1420` 可正常访问
+- `18789/healthz` 正常
+- `clawpanel -> openclaw-gateway` 的 WebSocket 代理在 bridge 模式下仍能正常握手
+- 微信插件检测与扫码登录链路保持正常
 
 ### 2. `openclaw-gateway` 首次启动缺配置直接退出
 

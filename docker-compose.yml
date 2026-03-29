@@ -3,13 +3,18 @@ services:
     image: ghcr.io/openclaw/openclaw:latest
     container_name: openclaw-gateway
     user: "0:0"
-    network_mode: "host"
+    networks:
+      - openclaw-net
     environment:
       HOME: /home/node
       OPENCLAW_INSTALL_WEIXIN_PLUGIN: "1"
       OPENCLAW_WEIXIN_PLUGIN_SPEC: "@tencent-weixin/openclaw-weixin@latest"
       TERM: xterm-256color
       TZ: UTC
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "18789:18789"
     volumes:
       - ./openclaw-data:/home/node/.openclaw
       - ./openclaw-workspace:/home/node/.openclaw/workspace
@@ -39,15 +44,22 @@ services:
       context: .
       dockerfile: Dockerfile.clawpanel
     container_name: clawpanel
-    network_mode: "service:openclaw-gateway"
     depends_on:
-      - openclaw-gateway
+      openclaw-gateway:
+        condition: service_healthy
+    networks:
+      - openclaw-net
     environment:
       HOME: /root
       NODE_ENV: production
       HOST: 0.0.0.0
       PORT: 1420
+      OPENCLAW_GATEWAY_HOST: openclaw-gateway
       TZ: UTC
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "1420:1420"
     volumes:
       - ./openclaw-data:/root/.openclaw
       - ./openclaw-workspace:/root/.openclaw/workspace
@@ -59,14 +71,18 @@ services:
     image: ghcr.io/openclaw/openclaw:latest
     container_name: openclaw-cli
     user: "0:0"
-    network_mode: "service:openclaw-gateway"
     depends_on:
-      - openclaw-gateway
+      openclaw-gateway:
+        condition: service_healthy
+    networks:
+      - openclaw-net
     environment:
       HOME: /home/node
       TERM: xterm-256color
       TZ: UTC
       BROWSER: echo
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./openclaw-data:/home/node/.openclaw
       - ./openclaw-workspace:/home/node/.openclaw/workspace
@@ -74,3 +90,7 @@ services:
     tty: true
     init: true
     profiles: ["cli"]
+
+networks:
+  openclaw-net:
+    driver: bridge

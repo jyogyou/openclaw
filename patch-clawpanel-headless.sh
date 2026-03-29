@@ -36,8 +36,36 @@ let devApi = fs.readFileSync(path.join(APP_DIR, 'scripts/dev-api.js'), 'utf8')
 devApi = insertBefore(
   devApi,
   `const OPENCLAW_DIR = path.join(homedir(), '.openclaw')\n`,
-  `const _uiEventClients = new Set()\n\nfunction _stripAnsi(value) {\n  return String(value || '').replace(/\\x1B\\[[0-9;]*[A-Za-z]/g, '')\n}\n\nfunction _emitUiEvent(eventName, payload) {\n  const frame = \`event: \${eventName}\\ndata: \${JSON.stringify(payload)}\\n\\n\`\n  for (const client of [..._uiEventClients]) {\n    try {\n      client.res.write(frame)\n    } catch {\n      clearInterval(client.keepalive)\n      _uiEventClients.delete(client)\n    }\n  }\n}\n\nfunction _emitChannelActionLog(platform, action, message) {\n  _emitUiEvent('channel-action-log', { platform, action, message: _stripAnsi(message) })\n}\n\nfunction _emitChannelActionProgress(platform, action, progress, stage = '') {\n  _emitUiEvent('channel-action-progress', { platform, action, progress, stage })\n}\n\nfunction _subscribeUiEvents(req, res) {\n  res.statusCode = 200\n  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8')\n  res.setHeader('Cache-Control', 'no-cache, no-transform')\n  res.setHeader('Connection', 'keep-alive')\n  res.setHeader('X-Accel-Buffering', 'no')\n  if (typeof res.flushHeaders === 'function') res.flushHeaders()\n  res.write('retry: 1000\\n\\n')\n  const client = {\n    res,\n    keepalive: setInterval(() => {\n      try { res.write(': ping\\n\\n') } catch {}\n    }, 15000),\n  }\n  _uiEventClients.add(client)\n  req.on('close', () => {\n    clearInterval(client.keepalive)\n    _uiEventClients.delete(client)\n  })\n}\n\n`,
+  `const _uiEventClients = new Set()\nconst OPENCLAW_GATEWAY_HOST = process.env.OPENCLAW_GATEWAY_HOST || '127.0.0.1'\n\nfunction _stripAnsi(value) {\n  return String(value || '').replace(/\\x1B\\[[0-9;]*[A-Za-z]/g, '')\n}\n\nfunction _emitUiEvent(eventName, payload) {\n  const frame = \`event: \${eventName}\\ndata: \${JSON.stringify(payload)}\\n\\n\`\n  for (const client of [..._uiEventClients]) {\n    try {\n      client.res.write(frame)\n    } catch {\n      clearInterval(client.keepalive)\n      _uiEventClients.delete(client)\n    }\n  }\n}\n\nfunction _emitChannelActionLog(platform, action, message) {\n  _emitUiEvent('channel-action-log', { platform, action, message: _stripAnsi(message) })\n}\n\nfunction _emitChannelActionProgress(platform, action, progress, stage = '') {\n  _emitUiEvent('channel-action-progress', { platform, action, progress, stage })\n}\n\nfunction _subscribeUiEvents(req, res) {\n  res.statusCode = 200\n  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8')\n  res.setHeader('Cache-Control', 'no-cache, no-transform')\n  res.setHeader('Connection', 'keep-alive')\n  res.setHeader('X-Accel-Buffering', 'no')\n  if (typeof res.flushHeaders === 'function') res.flushHeaders()\n  res.write('retry: 1000\\n\\n')\n  const client = {\n    res,\n    keepalive: setInterval(() => {\n      try { res.write(': ping\\n\\n') } catch {}\n    }, 15000),\n  }\n  _uiEventClients.add(client)\n  req.on('close', () => {\n    clearInterval(client.keepalive)\n    _uiEventClients.delete(client)\n  })\n}\n\n`,
   'dev-api event helpers',
+)
+
+devApi = replaceOnce(
+  devApi,
+  `      return { gatewayUrl: \`http://127.0.0.1:\${gw.port || 18789}\`, authToken: gw.auth?.token || '', version: null }\n`,
+  `      return { gatewayUrl: \`http://\${OPENCLAW_GATEWAY_HOST}:\${gw.port || 18789}\`, authToken: gw.auth?.token || '', version: null }\n`,
+  'dev-api deploy config gateway host',
+)
+
+devApi = replaceOnce(
+  devApi,
+  `      return { gatewayUrl: 'http://127.0.0.1:18789', authToken: '', version: null }\n`,
+  `      return { gatewayUrl: \`http://\${OPENCLAW_GATEWAY_HOST}:18789\`, authToken: '', version: null }\n`,
+  'dev-api deploy config fallback host',
+)
+
+devApi = replaceOnce(
+  devApi,
+  `        socket = await rawWsConnect('127.0.0.1', parseInt(gwPort), '/ws')\n`,
+  `        socket = await rawWsConnect(OPENCLAW_GATEWAY_HOST, parseInt(gwPort), '/ws')\n`,
+  'dev-api raw websocket gateway host',
+)
+
+devApi = replaceOnce(
+  devApi,
+  `    console.log(\`[gateway-chat] WebSocket 已连接 ws://127.0.0.1:\${gwPort}/ws\`)\n`,
+  `    console.log(\`[gateway-chat] WebSocket 已连接 ws://\${OPENCLAW_GATEWAY_HOST}:\${gwPort}/ws\`)\n`,
+  'dev-api raw websocket log host',
 )
 
 devApi = insertBeforeAny(
@@ -65,6 +93,24 @@ devApi = insertBefore(
 )
 
 fs.writeFileSync(path.join(APP_DIR, 'scripts/dev-api.js'), devApi)
+
+let serveJs = fs.readFileSync(path.join(APP_DIR, 'scripts/serve.js'), 'utf8')
+
+serveJs = insertBefore(
+  serveJs,
+  `async function main() {\n`,
+  `const OPENCLAW_GATEWAY_HOST = process.env.OPENCLAW_GATEWAY_HOST || '127.0.0.1'\n\n`,
+  'serve.js gateway host constant',
+)
+
+serveJs = replaceOnce(
+  serveJs,
+  `    const target = net.createConnection(gatewayPort, '127.0.0.1', () => {\n`,
+  `    const target = net.createConnection(gatewayPort, OPENCLAW_GATEWAY_HOST, () => {\n`,
+  'serve.js websocket proxy gateway host',
+)
+
+fs.writeFileSync(path.join(APP_DIR, 'scripts/serve.js'), serveJs)
 
 let channels = fs.readFileSync(path.join(APP_DIR, 'src/pages/channels.js'), 'utf8')
 
