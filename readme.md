@@ -20,7 +20,7 @@
 ## 使用方式
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/jyogyou/openclaw.git
 cd openclaw
 chmod +x docker-setup.sh install-autostart.sh patch-clawpanel-headless.sh
 ./docker-setup.sh
