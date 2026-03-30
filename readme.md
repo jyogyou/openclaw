@@ -15,12 +15,13 @@
 - 容器内可通过 `host.docker.internal:host-gateway` 访问宿主机开放的中转端口
 - 首次启动自动完成 OpenClaw 最小初始化
 - 首次启动自动安装微信插件
+- 启动时自动清理插件安装残留目录并修复不完整依赖（如 `zod` 缺失）
 - 面板中可识别微信插件，并可直接执行微信扫码登录
 
 ## 使用方式
 
 ```bash
-git clone https://github.com/jyogyou/openclaw.git
+git clone <your-repo-url>
 cd openclaw
 chmod +x docker-setup.sh install-autostart.sh patch-clawpanel-headless.sh
 ./docker-setup.sh
@@ -33,8 +34,16 @@ chmod +x docker-setup.sh install-autostart.sh patch-clawpanel-headless.sh
 - `docker compose up -d --build`
 - 等待 `openclaw-gateway` 和 `clawpanel` 可访问
 - 校验并确保微信插件已安装
+- 自动清理 `.openclaw-install-stage-*` 残留目录，避免扫码登录时报插件重复/缺依赖
 - 安装 `openclaw-compose.service`，实现开机自动启动
 - 清理 build cache，减少磁盘占用
+
+开机自动启动策略（`install-autostart.sh`）：
+
+- 安装前先执行一次 `docker compose up -d --build`，确保镜像和容器已就绪
+- systemd 开机阶段只执行：
+  - `docker compose up -d --no-build --remove-orphans`
+- 不在 `ExecStop` 里执行 `docker compose down`，避免关机时删除容器导致下次无法依赖重启策略恢复
 
 ## 部署完成后
 

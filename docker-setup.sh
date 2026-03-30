@@ -99,32 +99,47 @@ install_autostart() {
     return 0
   fi
   log "installing systemd autostart"
-  run_root bash "${PROJECT_DIR}/install-autostart.sh"
+  run_root env OPENCLAW_SKIP_INITIAL_BUILD=1 bash "${PROJECT_DIR}/install-autostart.sh"
 }
 
 deploy_stack() {
   log "building and starting docker compose stack"
   cd "${PROJECT_DIR}"
-  docker compose up -d --build
+  if ! docker compose up -d --build; then
+    log "initial compose up returned non-zero, retrying with no-build"
+    sleep 10
+    docker compose up -d --no-build --remove-orphans
+  fi
 }
 
 ensure_weixin_plugin() {
   local plugin_pkg="${PROJECT_DIR}/openclaw-data/extensions/openclaw-weixin/package.json"
-  if wait_file "${plugin_pkg}" 300; then
+  local plugin_dep="${PROJECT_DIR}/openclaw-data/extensions/openclaw-weixin/node_modules/zod/package.json"
+
+  docker exec openclaw-gateway sh -lc \
+    "EXT_DIR=/home/node/.openclaw/extensions; mkdir -p \"\$EXT_DIR\"; find \"\$EXT_DIR\" -maxdepth 1 -mindepth 1 -type d -name '.openclaw-install-stage-*' -exec rm -rf {} + || true" >/dev/null 2>&1 || true
+
+  if wait_file "${plugin_pkg}" 600 && wait_file "${plugin_dep}" 120; then
     log "weixin plugin detected in shared volume"
     return 0
   fi
-  log "weixin plugin not detected yet, forcing installation in gateway"
+
+  log "weixin plugin missing or incomplete, repairing in gateway"
   docker exec openclaw-gateway sh -lc \
-    "HOME=/home/node node dist/index.js plugins install '${WEIXIN_PLUGIN_SPEC}'"
-  wait_file "${plugin_pkg}" 180 || fail "weixin plugin installation did not complete"
+    "set -e; EXT_DIR=/home/node/.openclaw/extensions; mkdir -p \"\$EXT_DIR\"; find \"\$EXT_DIR\" -maxdepth 1 -mindepth 1 -type d -name '.openclaw-install-stage-*' -exec rm -rf {} + || true; TMP_HOME=\$(mktemp -d); HOME=\"\$TMP_HOME\" node dist/index.js plugins install '${WEIXIN_PLUGIN_SPEC}'; rm -rf \"\$EXT_DIR/openclaw-weixin\"; cp -a \"\$TMP_HOME/.openclaw/extensions/openclaw-weixin\" \"\$EXT_DIR/openclaw-weixin\"; rm -rf \"\$TMP_HOME\""
+
+  wait_file "${plugin_pkg}" 300 || fail "weixin plugin installation did not complete"
+  wait_file "${plugin_dep}" 180 || fail "weixin plugin dependencies are incomplete (zod missing)"
+
+  docker exec openclaw-gateway sh -lc \
+    "EXT_DIR=/home/node/.openclaw/extensions; find \"\$EXT_DIR\" -maxdepth 1 -mindepth 1 -type d -name '.openclaw-install-stage-*' -exec rm -rf {} + || true" >/dev/null 2>&1 || true
 }
 
 verify_stack() {
   log "waiting for openclaw gateway health"
-  wait_http_ok "http://127.0.0.1:18789/healthz" 600 || fail "gateway health check failed"
+  wait_http_ok "http://127.0.0.1:18789/healthz" 900 || fail "gateway health check failed"
   log "waiting for clawpanel web ui"
-  wait_http_ok "http://127.0.0.1:1420" 300 || fail "clawpanel web ui did not become ready"
+  wait_http_ok "http://127.0.0.1:1420" 600 || fail "clawpanel web ui did not become ready"
   ensure_weixin_plugin
   docker builder prune -af >/dev/null 2>&1 || true
 }

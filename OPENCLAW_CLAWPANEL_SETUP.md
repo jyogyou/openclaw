@@ -139,6 +139,36 @@ docker compose up -d --build
 
 - `openclaw-compose.service`
 
+### 2026-03-30 开机自启修复
+
+问题现象（用户反馈）：
+
+- 机器重启后 `openclaw` 栈无法稳定自动恢复
+
+根因分析：
+
+- 旧版 `openclaw-compose.service` 使用：
+  - `ExecStart=docker compose up -d --build`
+  - `ExecStop=docker compose down`
+- 关机阶段执行 `compose down` 会删除容器
+- 下次开机必须重新 build/创建，启动链路对网络和构建环境敏感，失败概率高
+
+修复方案：
+
+- `openclaw-compose.service` 改为：
+  - `ExecStart=docker compose up -d --no-build --remove-orphans`
+  - 删除 `ExecStop`
+  - 增加 `Restart=on-failure` 与 `RestartSec=10s`
+- `install-autostart.sh` 增加安装阶段的一次性预构建：
+  - `docker compose up -d --build`
+  - 然后再 `systemctl restart openclaw-compose.service`
+
+这样做的目的：
+
+- 把“构建”放到人工安装阶段
+- 把“开机恢复”简化成只拉起已有容器
+- 避免关机时删容器，确保 Docker `restart: unless-stopped` 能发挥作用
+
 更推荐的方式：
 
 - 使用 `install-autostart.sh`
@@ -156,7 +186,7 @@ docker compose up -d --build
 
 用途：
 
-- 让系统在开机时主动执行当前目录的 `docker compose up -d --build`
+- 让系统在开机时主动执行当前目录的 `docker compose up -d --no-build --remove-orphans`
 - 在某些需要“项目级启动入口”的机器上作为补充方案使用
 
 注意：
@@ -364,6 +394,88 @@ HOME=/root openclaw channels login --channel openclaw-weixin
   - `https://liteapp.weixin.qq.com/q/7GiQu1?qrcode=...&bot_type=3`
 - 若浏览器标签页是旧的，需强制刷新一次页面，以加载新的 `index-CzzH5wkr.js`
 
+### 6.1 进入面板后网关状态显示“关闭”，并在 `clawpanel` 容器内误启动本地网关
+
+现象：
+
+- Docker 双容器部署下，`openclaw-gateway` 实际在运行，但面板偶发显示 Gateway 关闭
+- 触发自动重启后，会在 `clawpanel` 容器内额外拉起一个本地 `openclaw-gateway`
+- 导致“状态显示”和“真实对外网关”不一致，且有双进程竞争共享卷风险
+
+根因：
+
+- `get_services_status` 的 Linux 分支优先按本机端口检测
+- Docker 场景真实网关在 `OPENCLAW_GATEWAY_HOST=openclaw-gateway`，不是 `clawpanel` 容器本机
+- `start_service/restart_gateway/reload_gateway` 也默认操作本机进程，导致误拉起
+
+处理方式（`patch-clawpanel-headless.sh`）：
+
+- 新增远端网关运行时判定：当 `OPENCLAW_GATEWAY_HOST` 不是 loopback，走远端模式
+- `get_services_status`：
+  - 优先通过 Docker Socket 查询 `openclaw-gateway` 容器状态与 PID
+  - 兜底用 `OPENCLAW_GATEWAY_HOST:gateway.port` 做 TCP 连通探测
+- `start_service/stop_service/restart_service/reload_gateway/restart_gateway`：
+  - 远端模式下改为直接操作网关容器（Docker API 的 start/stop/restart）
+  - 本机模式仍保持原来的 Linux/Mac/Windows 行为
+
+验证结果：
+
+- `docker top clawpanel` 不再出现本地 `openclaw-gateway` 进程
+- `POST /__api/get_services_status` 返回：
+  - `running: true`
+  - `pid` 为 `openclaw-gateway` 容器主进程 PID
+- `POST /__api/restart_gateway` 会重启 `openclaw-gateway` 容器本身，不会在 `clawpanel` 容器新起网关
+
+### 6.2 `channels.downloadingPlugin` 文案在旧分支仍可能直接显示 key 名
+
+现象：
+
+- `channels.js` 内存在两套渠道动作弹窗逻辑
+- 第一套分支仍使用 `t('channels.downloadingPlugin') || ...`，当 key 缺失时会显示 `channels.downloadingPlugin`
+
+处理方式：
+
+- 两套分支都增加“缺失 key 名回退判断”
+- 当 `t(...)` 返回 `channels.xxx` 原始 key 时，统一显示中文兜底文案
+
+验证结果：
+
+- 运行中代码已确认两处都包含 fallback 判断
+- 不再直接向用户展示 `channels.downloadingPlugin` / `channels.weixinOpenInBrowser` key 名
+
+### 6.3 微信扫码登录报 `duplicate plugin id` / `Cannot find module 'zod'`
+
+现象（2026-03-30 新反馈）：
+
+- 手动执行 `openclaw channels login --channel openclaw-weixin` 时失败
+- 日志出现：
+  - `duplicate plugin id detected`
+  - `Cannot find module 'zod'`
+  - 路径包含 `.openclaw-install-stage-*`
+
+根因：
+
+- 微信插件安装中断后，`~/.openclaw/extensions/.openclaw-install-stage-*` 临时目录残留
+- OpenClaw 在 `plugins.allow` 为空时会扫描非内置插件目录
+- 残留目录会被当成候选插件参与加载，触发重复 ID 或缺依赖报错，最终导致扫码流程卡死
+
+修复：
+
+- `docker-compose.yml` 的 `openclaw-gateway` 启动命令新增自愈逻辑：
+  - 每次启动先清理 `.openclaw-install-stage-*`
+  - 若 `openclaw-weixin` 缺少 `package.json`，先在临时 HOME 完成安装，再覆盖到共享卷
+  - 若 `node_modules/zod/package.json` 缺失，执行 `plugins update openclaw-weixin` 修复依赖
+- `docker-setup.sh` 的 `ensure_weixin_plugin` 增强为：
+  - 先清理残留 stage 目录
+  - 校验插件主文件 + `zod` 依赖完整性
+  - 不完整时走“临时 HOME 安装 -> 回填共享卷 -> 再校验”的非破坏式修复流程
+
+验证结果：
+
+- 人工注入 `.openclaw-install-stage-*` 异常目录后，CLI 登录命令会失败（已复现）
+- 重启 `openclaw-gateway` 后，stage 目录会被自动清除
+- 再次执行微信登录命令可恢复输出二维码与 `liteapp.weixin.qq.com/q/...` 登录链接
+
 ### 7. 镜像体积与磁盘优化
 
 为减少重建时磁盘占用，`Dockerfile.clawpanel` 已做两点优化：
@@ -400,7 +512,7 @@ docker compose up -d --build
 补充说明：
 
 - 当前方案默认面向 Linux
-- 因使用 `network_mode: "host"`，宿主机上的 `1420/18789/18790` 不能被其他进程占用
+- 当前采用自定义 `bridge` 网络 `openclaw-net`，宿主机发布端口为 `1420`（面板）和 `18789`（Gateway）
 
 ## 首次登录信息
 
@@ -424,7 +536,7 @@ docker compose up -d --build
 - `docker compose ps` 显示 `openclaw-gateway` 为 `healthy`
 - `curl http://127.0.0.1:1420` 返回 `HTTP/1.1 200 OK`
 - `curl http://127.0.0.1:18789/healthz` 返回 `{"ok":true,"status":"live"}`
-- 修复后 `docker compose ps` 不再显示端口映射，这是 `host` 网络模式下的正常表现
+- `docker compose ps` 显示 `0.0.0.0:1420->1420/tcp` 与 `0.0.0.0:18789->18789/tcp`，这是 `bridge` 网络端口发布的正常表现
 - `POST /__api/check_weixin_plugin_status`（登录后）返回：
   - `installed: true`
   - `installedVersion: 2.1.1`

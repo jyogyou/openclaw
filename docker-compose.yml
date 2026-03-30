@@ -24,7 +24,7 @@ services:
       [
         "sh",
         "-lc",
-        "mkdir -p /home/node/.openclaw /home/node/.openclaw/workspace && if [ ! -f /home/node/.openclaw/openclaw.json ]; then node dist/index.js config set gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback true --strict-json; fi && if [ \"${OPENCLAW_INSTALL_WEIXIN_PLUGIN:-1}\" = \"1\" ] && [ ! -f /home/node/.openclaw/extensions/openclaw-weixin/package.json ]; then HOME=/home/node node dist/index.js plugins install \"${OPENCLAW_WEIXIN_PLUGIN_SPEC:-@tencent-weixin/openclaw-weixin@latest}\"; fi && exec node dist/index.js gateway --bind lan --port 18789 --allow-unconfigured",
+        "set -e; EXT_DIR=/home/node/.openclaw/extensions; WEIXIN_DIR=\"$$EXT_DIR/openclaw-weixin\"; mkdir -p /home/node/.openclaw /home/node/.openclaw/workspace \"$$EXT_DIR\"; find \"$$EXT_DIR\" -maxdepth 1 -mindepth 1 -type d -name '.openclaw-install-stage-*' -exec rm -rf {} + || true; if [ ! -f /home/node/.openclaw/openclaw.json ]; then node dist/index.js config set gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback true --strict-json; fi; if [ \"${OPENCLAW_INSTALL_WEIXIN_PLUGIN:-1}\" = \"1\" ]; then if [ ! -f \"$$WEIXIN_DIR/package.json\" ]; then TMP_HOME=$$(mktemp -d); if HOME=\"$$TMP_HOME\" node dist/index.js plugins install \"${OPENCLAW_WEIXIN_PLUGIN_SPEC:-@tencent-weixin/openclaw-weixin@latest}\"; then rm -rf \"$$WEIXIN_DIR\"; cp -a \"$$TMP_HOME/.openclaw/extensions/openclaw-weixin\" \"$$WEIXIN_DIR\"; else echo '[startup] weixin plugin install failed, continue boot'; fi; rm -rf \"$$TMP_HOME\"; elif [ ! -f \"$$WEIXIN_DIR/node_modules/zod/package.json\" ]; then HOME=/home/node node dist/index.js plugins update openclaw-weixin || echo '[startup] weixin plugin repair failed, continue boot'; fi; fi; exec node dist/index.js gateway --bind lan --port 18789 --allow-unconfigured",
       ]
     healthcheck:
       test:
@@ -34,10 +34,10 @@ services:
           "-e",
           "fetch('http://127.0.0.1:18789/healthz').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
         ]
-      interval: 30s
+      interval: 20s
       timeout: 5s
-      retries: 5
-      start_period: 20s
+      retries: 30
+      start_period: 360s
 
   clawpanel:
     build:
@@ -46,7 +46,7 @@ services:
     container_name: clawpanel
     depends_on:
       openclaw-gateway:
-        condition: service_healthy
+        condition: service_started
     networks:
       - openclaw-net
     environment:
@@ -73,7 +73,7 @@ services:
     user: "0:0"
     depends_on:
       openclaw-gateway:
-        condition: service_healthy
+        condition: service_started
     networks:
       - openclaw-net
     environment:

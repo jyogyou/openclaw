@@ -7,9 +7,10 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 WorkingDirectory=__PROJECT_DIR__
-ExecStart=__DOCKER_BIN__ compose up -d --build
-ExecStop=__DOCKER_BIN__ compose down
+ExecStart=__DOCKER_BIN__ compose up -d --no-build --remove-orphans
 RemainAfterExit=yes
+Restart=on-failure
+RestartSec=10s
 TimeoutStartSec=0
 
 [Install]

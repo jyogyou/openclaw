@@ -68,6 +68,48 @@ devApi = replaceOnce(
   'dev-api raw websocket log host',
 )
 
+devApi = insertBefore(
+  devApi,
+  `// === Linux 服务管理 ===\n`,
+  `function _isLoopbackHost(host) {\n  const v = String(host || '').trim().toLowerCase()\n  return !v || v === '127.0.0.1' || v === 'localhost' || v === '::1' || v === '[::1]'\n}\n\nfunction _useRemoteGatewayRuntime() {\n  return isLinux && !_isLoopbackHost(OPENCLAW_GATEWAY_HOST)\n}\n\nfunction _checkTcpPortOpen(host, port, timeoutMs = 2000) {\n  return new Promise((resolve) => {\n    const sock = net.createConnection(port, host, () => {\n      sock.destroy()\n      resolve(true)\n    })\n    sock.on('error', () => resolve(false))\n    sock.setTimeout(timeoutMs, () => {\n      sock.destroy()\n      resolve(false)\n    })\n  })\n}\n\nfunction _dockerApiError(resp, fallback) {\n  if (!resp) return fallback\n  if (typeof resp.data === 'string' && resp.data.trim()) return resp.data.trim()\n  if (resp.data && typeof resp.data === 'object' && resp.data.message) return String(resp.data.message)\n  return fallback\n}\n\nasync function _findDockerGatewayContainerId() {\n  if (!_useRemoteGatewayRuntime() || !isDockerAvailable()) return null\n  const target = String(OPENCLAW_GATEWAY_HOST || '').trim().toLowerCase()\n  const listResp = await dockerRequest('GET', '/containers/json?all=true')\n  const list = Array.isArray(listResp?.data) ? listResp.data : []\n\n  let container = list.find((c) =>\n    (c.Names || []).some((name) => name.replace(/^\\//, '').toLowerCase() === target),\n  )\n\n  if (!container && target) {\n    container = list.find((c) => String(c.Id || '').toLowerCase().startsWith(target))\n  }\n\n  if (!container) {\n    container = list.find((c) => c?.Labels?.['com.docker.compose.service'] === 'openclaw-gateway')\n  }\n\n  if (!container) {\n    const gwPort = readGatewayPort()\n    container = list.find((c) => (c.Ports || []).some((p) => Number(p?.PrivatePort) === Number(gwPort)))\n  }\n\n  return container?.Id || null\n}\n\nasync function _dockerGatewayContainerStatus() {\n  const id = await _findDockerGatewayContainerId()\n  if (!id) return { running: false, pid: null }\n  const inspect = await dockerRequest('GET', \`/containers/\${id}/json\`)\n  const state = inspect?.data?.State || {}\n  return {\n    running: state.Running === true,\n    pid: Number.isFinite(state.Pid) && state.Pid > 0 ? state.Pid : null,\n  }\n}\n\nasync function _dockerGatewayContainerAction(action) {\n  const id = await _findDockerGatewayContainerId()\n  if (!id) throw new Error(\`未找到网关容器（OPENCLAW_GATEWAY_HOST=\${OPENCLAW_GATEWAY_HOST}）\`)\n\n  let apiPath = ''\n  if (action === 'start') apiPath = \`/containers/\${id}/start\`\n  else if (action === 'stop') apiPath = \`/containers/\${id}/stop?t=10\`\n  else if (action === 'restart') apiPath = \`/containers/\${id}/restart?t=10\`\n  else throw new Error(\`不支持的容器动作: \${action}\`)\n\n  const resp = await dockerRequest('POST', apiPath)\n  if (resp?.status && resp.status >= 400) {\n    throw new Error(_dockerApiError(resp, \`网关容器\${action}失败 (HTTP \${resp.status})\`))\n  }\n  return true\n}\n\n`,
+  'dev-api remote gateway runtime helpers',
+)
+
+devApi = replaceOnce(
+  devApi,
+  `      let { running, pid } = isMac ? macCheckService(label) : isLinux ? linuxCheckGateway() : await winCheckGateway()\n\n      // 通用兜底：进程检测说没运行，但端口实际在监听 → Gateway 已在运行\n      if (!running) {\n        const port = readGatewayPort()\n        const portOpen = await new Promise(resolve => {\n          const sock = net.createConnection(port, '127.0.0.1', () => { sock.destroy(); resolve(true) })\n          sock.on('error', () => resolve(false))\n          sock.setTimeout(2000, () => { sock.destroy(); resolve(false) })\n        })\n        if (portOpen) { running = true }\n      }\n`,
+  `      let running = false\n      let pid = null\n\n      if (isMac) {\n        ({ running, pid } = macCheckService(label))\n      } else if (isLinux) {\n        if (_useRemoteGatewayRuntime()) {\n          ({ running, pid } = await _dockerGatewayContainerStatus())\n          if (!running) {\n            const portOpen = await _checkTcpPortOpen(OPENCLAW_GATEWAY_HOST, readGatewayPort(), 2000)\n            if (portOpen) running = true\n          }\n        } else {\n          ({ running, pid } = linuxCheckGateway())\n          if (!running) {\n            const portOpen = await _checkTcpPortOpen('127.0.0.1', readGatewayPort(), 2000)\n            if (portOpen) running = true\n          }\n        }\n      } else {\n        ({ running, pid } = await winCheckGateway())\n      }\n`,
+  'dev-api service status remote gateway detection',
+)
+
+devApi = replaceOnce(
+  devApi,
+  `  start_service({ label }) {\n    if (isMac) { macStartService(label); return true }\n    if (isLinux) { linuxStartGateway(); return true }\n    winStartGateway()\n    return true\n  },\n`,
+  `  async start_service({ label }) {\n    if (isMac) { macStartService(label); return true }\n    if (isLinux) {\n      if (_useRemoteGatewayRuntime()) {\n        await _dockerGatewayContainerAction('start')\n        return true\n      }\n      linuxStartGateway()\n      return true\n    }\n    winStartGateway()\n    return true\n  },\n`,
+  'dev-api start_service remote docker gateway control',
+)
+
+devApi = replaceOnce(
+  devApi,
+  `  async stop_service({ label }) {\n    if (isMac) { macStopService(label); return true }\n    if (isLinux) { linuxStopGateway(); return true }\n    await winStopGateway()\n    return true\n  },\n`,
+  `  async stop_service({ label }) {\n    if (isMac) { macStopService(label); return true }\n    if (isLinux) {\n      if (_useRemoteGatewayRuntime()) {\n        await _dockerGatewayContainerAction('stop')\n        return true\n      }\n      linuxStopGateway()\n      return true\n    }\n    await winStopGateway()\n    return true\n  },\n`,
+  'dev-api stop_service remote docker gateway control',
+)
+
+devApi = replaceOnce(
+  devApi,
+  `  async restart_service({ label }) {\n    if (isMac) { macRestartService(label); return true }\n    if (isLinux) {\n      try { linuxStopGateway() } catch {}\n      for (let i = 0; i < 10; i++) {\n        const { running } = linuxCheckGateway()\n        if (!running) break\n        await new Promise(r => setTimeout(r, 500))\n      }\n      linuxStartGateway()\n      return true\n    }\n    await winStopGateway()\n    for (let i = 0; i < 10; i++) {\n      const { running } = await winCheckGateway()\n      if (!running) break\n      await new Promise(r => setTimeout(r, 500))\n    }\n    winStartGateway()\n    return true\n  },\n`,
+  `  async restart_service({ label }) {\n    if (isMac) { macRestartService(label); return true }\n    if (isLinux) {\n      if (_useRemoteGatewayRuntime()) {\n        await _dockerGatewayContainerAction('restart')\n        return true\n      }\n      try { linuxStopGateway() } catch {}\n      for (let i = 0; i < 10; i++) {\n        const { running } = linuxCheckGateway()\n        if (!running) break\n        await new Promise(r => setTimeout(r, 500))\n      }\n      linuxStartGateway()\n      return true\n    }\n    await winStopGateway()\n    for (let i = 0; i < 10; i++) {\n      const { running } = await winCheckGateway()\n      if (!running) break\n      await new Promise(r => setTimeout(r, 500))\n    }\n    winStartGateway()\n    return true\n  },\n`,
+  'dev-api restart_service remote docker gateway control',
+)
+
+devApi = replaceOnce(
+  devApi,
+  `  reload_gateway() {\n    if (isMac) {\n      macRestartService('ai.openclaw.gateway')\n      return 'Gateway 已重启'\n    } else if (isLinux) {\n      try { linuxStopGateway() } catch {}\n      linuxStartGateway()\n      return 'Gateway 已重启'\n    } else {\n      throw new Error('Windows 请使用 Tauri 桌面应用')\n    }\n  },\n\n  restart_gateway() {\n    if (isMac) {\n      macRestartService('ai.openclaw.gateway')\n      return 'Gateway 已重启'\n    } else if (isLinux) {\n      try { linuxStopGateway() } catch {}\n      linuxStartGateway()\n      return 'Gateway 已重启'\n    } else {\n      throw new Error('Windows 请使用 Tauri 桌面应用')\n    }\n  },\n`,
+  `  async reload_gateway() {\n    if (isMac) {\n      macRestartService('ai.openclaw.gateway')\n      return 'Gateway 已重启'\n    } else if (isLinux) {\n      if (_useRemoteGatewayRuntime()) {\n        await _dockerGatewayContainerAction('restart')\n        return 'Gateway 已重启'\n      }\n      try { linuxStopGateway() } catch {}\n      linuxStartGateway()\n      return 'Gateway 已重启'\n    } else {\n      throw new Error('Windows 请使用 Tauri 桌面应用')\n    }\n  },\n\n  async restart_gateway() {\n    if (isMac) {\n      macRestartService('ai.openclaw.gateway')\n      return 'Gateway 已重启'\n    } else if (isLinux) {\n      if (_useRemoteGatewayRuntime()) {\n        await _dockerGatewayContainerAction('restart')\n        return 'Gateway 已重启'\n      }\n      try { linuxStopGateway() } catch {}\n      linuxStartGateway()\n      return 'Gateway 已重启'\n    } else {\n      throw new Error('Windows 请使用 Tauri 桌面应用')\n    }\n  },\n`,
+  'dev-api reload/restart gateway remote docker control',
+)
+
 devApi = insertBeforeAny(
   devApi,
   [
@@ -126,6 +168,20 @@ channels = replaceRegex(
   /^(\s*)const \{ listen \} = await import\('@tauri-apps\/api\/event'\)\n/gm,
   `$1const listen = listenPanelEvent\n`,
   'channels listen replacements',
+)
+
+channels = replaceOnce(
+  channels,
+  `            hint.textContent = t('channels.downloadingPlugin') || '正在下载，请稍候（首次安装可能需要几分钟）...'\n`,
+  `            hint.textContent = (() => {\n              const _text = t('channels.downloadingPlugin')\n              return (!_text || _text === 'channels.downloadingPlugin')\n                ? '正在下载，请稍候（首次安装可能需要几分钟）...'\n                : _text\n            })()\n`,
+  'channels legacy downloadingPlugin fallback fix',
+)
+
+channels = replaceOnce(
+  channels,
+  `                  <div style="margin-top:8px"><a href="\${escapeAttr(qrUrl)}" target="_blank" rel="noopener" style="color:var(--accent);font-size:var(--font-size-xs);word-break:break-all">\${t('channels.weixinOpenInBrowser') || '或点击此链接在浏览器中打开'}</a></div>\n`,
+  `                  <div style="margin-top:8px"><a href="\${escapeAttr(qrUrl)}" target="_blank" rel="noopener" style="color:var(--accent);font-size:var(--font-size-xs);word-break:break-all">\${(() => { const _text = t('channels.weixinOpenInBrowser'); return (!_text || _text === 'channels.weixinOpenInBrowser') ? '或点击此链接在浏览器中打开' : _text })()}</a></div>\n`,
+  'channels legacy weixinOpenInBrowser fallback fix',
 )
 
 channels = replaceOnce(
@@ -198,7 +254,10 @@ channels = replaceOnce(
           const hint = document.createElement('div')
           hint.style.cssText = 'color:var(--text-tertiary);font-style:italic'
           hint.id = 'action-loading-hint'
-          hint.textContent = t('channels.downloadingPlugin') || '正在下载，请稍候（首次安装可能需要几分钟）...'
+          const _downloadingText = t('channels.downloadingPlugin')
+          hint.textContent = (!_downloadingText || _downloadingText === 'channels.downloadingPlugin')
+            ? '正在下载，请稍候（首次安装可能需要几分钟）...'
+            : _downloadingText
           logBox.appendChild(hint)
         }
         const _qrBuf = []
@@ -256,12 +315,13 @@ channels = replaceOnce(
             if (weixinUrlMatch && !_qrDone) {
               _qrDone = true
               const qrUrl = weixinUrlMatch[1]
+              const _openInBrowserText = t('channels.weixinOpenInBrowser')
               const wrap = document.createElement('div')
               wrap.style.cssText = 'text-align:center;margin:12px 0;padding:16px;background:#fff;border-radius:var(--radius-md);border:1px solid var(--border-primary)'
               wrap.innerHTML = \`
                 <div style="font-size:var(--font-size-sm);font-weight:600;color:#000;margin-bottom:8px">\${t('channels.weixinScanQr')}</div>
                 <img src="https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=\${encodeURIComponent(qrUrl)}" alt="WeChat QR" style="width:200px;height:200px;image-rendering:pixelated;border-radius:4px;margin:0 auto;display:block" loading="eager">
-                <div style="margin-top:8px"><a href="\${escapeAttr(qrUrl)}" target="_blank" rel="noopener" style="color:var(--accent);font-size:var(--font-size-xs);word-break:break-all">\${t('channels.weixinOpenInBrowser') || '或点击此链接在浏览器中打开'}</a></div>
+                <div style="margin-top:8px"><a href="\${escapeAttr(qrUrl)}" target="_blank" rel="noopener" style="color:var(--accent);font-size:var(--font-size-xs);word-break:break-all">\${(!_openInBrowserText || _openInBrowserText === 'channels.weixinOpenInBrowser') ? '或点击此链接在浏览器中打开' : _openInBrowserText}</a></div>
               \`
               logBox.appendChild(wrap)
             } else if (msg.trim()) {

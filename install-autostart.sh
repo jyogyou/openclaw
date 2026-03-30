@@ -35,6 +35,11 @@ sed \
 systemctl enable docker
 systemctl daemon-reload
 systemctl enable "${SERVICE_NAME}"
+if [[ "${OPENCLAW_SKIP_INITIAL_BUILD:-0}" != "1" ]]; then
+  if ! ${DOCKER_BIN} compose -f "${PROJECT_DIR}/docker-compose.yml" up -d --build; then
+    echo "warning: initial build/start failed during autostart install; service is still installed."
+  fi
+fi
 systemctl restart "${SERVICE_NAME}"
 
 echo
